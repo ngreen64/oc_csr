@@ -17,6 +17,8 @@
 
 import base64
 import json
+import time
+import os
 
 from ansible.module_utils.basic import AnsibleModule
 
@@ -24,6 +26,10 @@ try:
     from json.decoder import JSONDecodeError
 except ImportError:
     JSONDecodeError = ValueError
+    
+ts = time.time()
+filename = "/tmp/csr_attempt_" + str(ts) + "_out.txt"
+logfile = open(filename, 'a+')
 
 DOCUMENTATION = '''
 ---
@@ -54,6 +60,7 @@ CERT_MODE = {'client': 'client auth', 'server': 'server auth'}
 
 
 def parse_subject_cn(subject_str):
+    logfile.write("Running function parse_subject_cn...")
     '''parse output of openssl req -noout -subject to retrieve CN.
        example input:
          'subject=/C=US/CN=test.io/L=Raleigh/O=Red Hat/ST=North Carolina/OU=OpenShift\n'
@@ -72,6 +79,7 @@ def parse_subject_cn(subject_str):
 
 
 class CSRapprove(object):
+    logfile.write("Running function CSRapprove...")
     """Approves csr requests"""
 
     def __init__(self, module, oc_bin, oc_conf, node_list):
@@ -94,6 +102,7 @@ class CSRapprove(object):
                        'unwanted_csrs': self.unwanted_csrs}
 
     def run_command(self, command, rc_opts=None):
+        logfile.write("Running function run_command...")
         '''Run a command using AnsibleModule.run_command, or fail'''
         if rc_opts is None:
             rc_opts = {}
@@ -106,6 +115,7 @@ class CSRapprove(object):
         return stdout
 
     def get_nodes(self):
+        logfile.write("Running function get_nodes...")
         '''Get all nodes via oc get nodes -ojson'''
         # json output is necessary for consistency here.
         command = "{} {} get nodes -ojson".format(self.oc_bin, self.oc_conf)
@@ -121,9 +131,11 @@ class CSRapprove(object):
         return [node['metadata']['name'] for node in data['items']]
 
     def get_csrs(self):
+        logfile.write("Running function get_csrs...")
         '''Retrieve csrs from cluster using oc get csr -ojson'''
         command = "{} {} get csr -ojson".format(self.oc_bin, self.oc_conf)
         stdout = self.run_command(command)
+        logfile.write("function get_csrs stdout = " + str(stdout))
         try:
             data = json.loads(stdout)
         except JSONDecodeError as err:
@@ -134,20 +146,25 @@ class CSRapprove(object):
         return data['items']
 
     def process_csrs(self, csrs, mode):
+        logfile.write("Running function process_csrs...")
         '''Return a dictionary of pending csrs where the format of the dict is
            k=csr name, v=Subject Common Name'''
         csr_dict = {}
         for item in csrs:
             name = item['metadata']['name']
+            logfile.write("function process_csrs name = " + str(name))
             request_data = base64.b64decode(item['spec']['request'])
+            logfile.write("function process_csrs request_data = " + str(request_data))
             command = "openssl req -noout -subject"
             # ansible's module.run_command accepts data to pipe via stdin as
             # as 'data' kwarg.
             rc_opts = {'data': request_data, 'binary_data': True}
             stdout = self.run_command(command, rc_opts=rc_opts)
+            logfile.write("function process_csrs stdout = " + str(stdout))
             self.all_subjects_found.append(stdout)
 
             status = item['status'].get('conditions')
+            logfile.write("function process_csrs status = " + str(status))
             if status:
                 # If status is not an empty dictionary, cert is not pending.
                 self.unwanted_csrs.append(item)
@@ -157,6 +174,7 @@ class CSRapprove(object):
                 continue
             # parse common_name from subject string.
             common_name = parse_subject_cn(stdout)
+            logfile.write("function process_csrs common_name = " + str(common_name))
             if common_name and common_name.startswith('system:node:'):
                 # common name is typically prepended with system:node:.
                 common_name = common_name.split('system:node:')[1]
@@ -170,7 +188,10 @@ class CSRapprove(object):
 
     def confirm_needed_requests_present(self, not_ready_nodes, csr_dict):
         '''Ensure all non-Ready nodes have a csr, or fail'''
+        logfile.write("Running function confirm_needed_requests_present...")
         nodes_needed = set(not_ready_nodes)
+        logfile.write("function confirm_needed_requests_present nodes_needed = " + str(nodes_needed))
+        
         for _, val in csr_dict.items():
             nodes_needed.discard(val)
 
@@ -183,15 +204,19 @@ class CSRapprove(object):
             self.module.fail_json(**self.result)
 
     def approve_csrs(self, csr_pending_list, mode):
+        logfile.write("Running function approve_csrs...")
         '''Loop through csr_pending_list and call:
            oc adm certificate approve <item>'''
         res_mode = "{}_approve_results".format(mode)
+        logfile.write("function approve_csrs res_mode = " + str(res_mode))
         base_command = "{} {} adm certificate approve {}"
+        logfile.write("function approve_csrs base_command = " + base_command)
         approve_results = []
         for csr in csr_pending_list:
             command = base_command.format(self.oc_bin, self.oc_conf, csr)
             rtnc, stdout, err = self.module.run_command(command)
             approve_results.append(stdout)
+            logfile.write("function approve_csrs stdout for CSR " + str(csr) + " = " + str(stdout))
             if rtnc:
                 self.result['failed'] = True
                 self.result['msg'] = str(err)
@@ -203,6 +228,7 @@ class CSRapprove(object):
         self.result['changed'] = bool(approve_results) or bool(self.result['changed'])
 
     def get_ready_nodes_server(self, nodes_list):
+        logfile.write("Running function get_ready_nodes_server...")
         '''Determine which nodes have working server certificates'''
         ready_nodes_server = []
         base_command = "{} {} get --raw /api/v1/nodes/{}/proxy/healthz"
@@ -214,17 +240,21 @@ class CSRapprove(object):
                 # if we can hit that api endpoint, the node has a valid server
                 # cert.
                 ready_nodes_server.append(node)
+        logfile.write("function get_ready_nodes_server ready_nodes_server = " + str(ready_nodes_server))
         return ready_nodes_server
 
     def verify_server_csrs(self):
+        logfile.write("Running function verify_server_csrs...")
         '''We approved some server csrs, now we need to validate they are working.
            This function will attempt to retry 10 times in case of failure.'''
         # Attempt to try node endpoints a few times.
         attempts = 0
         # Find not_ready_nodes for server-side again
         nodes_server_ready = self.get_ready_nodes_server(self.node_list)
+        logfile.write("function nodes_server_ready = " + str(nodes_server_ready))
         # Create list of nodes that still aren't ready.
         not_ready_nodes_server = set([item for item in self.node_list if item not in nodes_server_ready])
+        logfile.write("function not_ready_nodes_server = " + str(not_ready_nodes_server))
         while not_ready_nodes_server:
             nodes_server_ready = self.get_ready_nodes_server(not_ready_nodes_server)
 
@@ -243,18 +273,22 @@ class CSRapprove(object):
                 self.module.fail_json(**self.result)
 
     def run(self):
+        logfile.write("Running function run...")
         '''execute the csr approval process'''
         all_nodes = self.get_nodes()
+        logfile.write("function run all_nodes = " + str(all_nodes))
         # don't need to check nodes that have already joined the cluster because
         # client csr needs to be approved for now to show in output of
         # oc get nodes.
         not_found_nodes = [item for item in self.node_list
                            if item not in all_nodes]
-
+        logfile.write("function run not_found_nodes = " + str(not_found_nodes))
         # Get all csrs, no good way to filter on pending.
         client_csrs = self.get_csrs()
+        logfile.write("function run client_csrs = " + str(client_csrs))
         # process data in csrs and build a dictionary of client requests
         client_csr_dict = self.process_csrs(client_csrs, "client")
+        logfile.write("function run client_csr_dict = " + str(client_csr_dict))
         self.result['client_csrs'] = client_csr_dict
 
         # This method is fail-happy and expects all not found nodes have available
@@ -269,14 +303,17 @@ class CSRapprove(object):
         # # Server Cert Section # #
         # Find not_ready_nodes for server-side
         nodes_server_ready = self.get_ready_nodes_server(self.node_list)
+        logfile.write("function run nodes_server_ready = " + str(nodes_server_ready))
         # Create list of nodes that definitely need a server cert approved.
         not_ready_nodes_server = [item for item in self.node_list
                                   if item not in nodes_server_ready]
-
+        logfile.write("function run not_ready_nodes_server = " + str(not_ready_nodes_server))
         # Get all csrs again, no good way to filter on pending.
         server_csrs = self.get_csrs()
+        logfile.write("function run server_csrs = " + str(server_csrs))
         # process data in csrs and build a dictionary of server requests
         server_csr_dict = self.process_csrs(server_csrs, "server")
+        logfile.write("function run server_csr_dict = " + str(server_csr_dict))
         self.result['server_csrs'] = server_csr_dict
 
         # This will fail if all server csrs are not present, but probably shouldn't
@@ -297,6 +334,8 @@ class CSRapprove(object):
 
 def run_module():
     '''Run this module'''
+    logfile.write("Running function run_module.......")
+    
     module_args = dict(
         oc_bin=dict(type='path', required=False, default='oc'),
         oc_conf=dict(type='path', required=False, default='/etc/origin/master/admin.kubeconfig'),
@@ -309,8 +348,13 @@ def run_module():
     oc_bin = module.params['oc_bin']
     oc_conf = '--config={}'.format(module.params['oc_conf'])
     node_list = module.params['node_list']
-
+    
+    logfile.write("oc_bin = " + str(oc_bin))
+    logfile.write("oc_conf = " + str(oc_conf))
+    logfile.write("node_list = " + str(node_list))
+    
     approver = CSRapprove(module, oc_bin, oc_conf, node_list)
+    logfile.write("approver = " + str(approver))
     approver.run()
 
 
@@ -321,3 +365,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+logfile.close()
